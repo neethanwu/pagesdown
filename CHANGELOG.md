@@ -31,5 +31,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - ANSI Shadow ASCII art banner
 - MIT license
 
-[Unreleased]: https://github.com/neethanwu/notion-download/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/neethanwu/notion-download/releases/tag/v0.1.0
+[Unreleased]: https://github.com/neethanwu/ntn-download/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/neethanwu/ntn-download/releases/tag/v0.1.0

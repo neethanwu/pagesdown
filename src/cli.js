@@ -32,7 +32,7 @@ const BANNER = `
 
 async function main() {
   console.log(BANNER);
-  p.intro('notion-download v0.1.0');
+  p.intro('ntn-download v0.1.0');
 
   // ── Step 1: Token ─────────────────────────────────────────────────
   let token = null;

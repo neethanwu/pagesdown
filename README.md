@@ -1,4 +1,4 @@
-# notion-download
+# ntn-download
 
 Download your Notion content to local Markdown files. Beautiful guided CLI, clean output, ready for AI coding agents.
 
@@ -13,7 +13,7 @@ Notion's MCP server and API are token-expensive. If you use AI coding agents lik
 ## Quick Start
 
 ```
-npx notion-download
+npx ntn-download
 ```
 
 That's it. The tool will walk you through everything.
