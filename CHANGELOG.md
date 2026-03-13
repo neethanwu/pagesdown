@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Child page and database links inline in correct order (block-segment interleaving)
 - Database index files for navigable relative links
 - OS-aware save location picker (Desktop, Documents, Downloads, OneDrive on Windows)
-- Token persistence for returning users (~/.notion-to-fs/config.json)
+- Token persistence for returning users (~/.pagesdown/config.json)
 - Rate limit handling with automatic retry and promise-chain queue
 - Real-time progress reporting (status, milestones, errors)
 - Page selection with refresh loop for sharing additional pages

@@ -2,7 +2,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 
-const CONFIG_DIR = path.join(os.homedir(), '.notion-to-fs');
+const CONFIG_DIR = path.join(os.homedir(), '.pagesdown');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 
 /**
@@ -23,7 +23,7 @@ export async function loadConfig() {
 }
 
 /**
- * Save config to ~/.notion-to-fs/config.json.
+ * Save config to ~/.pagesdown/config.json.
  * Directory and file are created with restrictive permissions from the start.
  */
 export async function saveConfig(config) {

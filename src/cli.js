@@ -247,7 +247,7 @@ async function main() {
   if (!savedConfig?.token || savedConfig.token !== token) {
     const shouldSave = exitIfCancelled(
       await p.confirm({
-        message: 'Save token for future use? (stored in ~/.notion-to-fs/config.json)',
+        message: 'Save token for future use? (stored in ~/.pagesdown/config.json)',
       })
     );
 
