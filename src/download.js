@@ -6,12 +6,86 @@ import { extractTitle } from './notion.js';
 
 const MAX_DEPTH = 20;
 const DOWNLOAD_TIMEOUT_MS = 60_000;
+const ASSET_CONCURRENCY = 5;
+const MAX_ASSET_SIZE = 50 * 1024 * 1024; // 50 MB
 
 // Block private/internal IP ranges to prevent SSRF
 const BLOCKED_HOSTNAMES = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', '[::1]']);
 const PRIVATE_IP_PREFIXES = ['10.', '192.168.', '169.254.', '172.16.', '172.17.', '172.18.',
   '172.19.', '172.20.', '172.21.', '172.22.', '172.23.', '172.24.', '172.25.', '172.26.',
   '172.27.', '172.28.', '172.29.', '172.30.', '172.31.'];
+
+/**
+ * Split blocks at child_page/child_database boundaries.
+ * Returns { markdownParts, childEntries } for conversion and recursion.
+ */
+function splitBlocksAtBoundaries(blocks) {
+  const usedNames = new Set();
+  const childEntries = [];
+  const markdownParts = [];
+  let currentSegment = [];
+
+  for (const block of blocks) {
+    if (block.type === 'child_page') {
+      if (currentSegment.length > 0) {
+        markdownParts.push({ type: 'blocks', blocks: currentSegment });
+        currentSegment = [];
+      }
+      const childTitle = block.child_page?.title || 'Untitled';
+      const childName = uniqueFilename(sanitizeFilename(childTitle), usedNames);
+      childEntries.push({ block, title: childTitle, name: childName, type: 'page' });
+      markdownParts.push({ type: 'link', title: childTitle, name: childName });
+    } else if (block.type === 'child_database') {
+      if (currentSegment.length > 0) {
+        markdownParts.push({ type: 'blocks', blocks: currentSegment });
+        currentSegment = [];
+      }
+      const dbTitle = block.child_database?.title || 'Untitled Database';
+      const dbName = uniqueFilename(sanitizeFilename(dbTitle), usedNames);
+      childEntries.push({ block, title: dbTitle, name: dbName, type: 'database' });
+      markdownParts.push({ type: 'link', title: dbTitle, name: dbName });
+    } else {
+      currentSegment.push(block);
+    }
+  }
+  if (currentSegment.length > 0) {
+    markdownParts.push({ type: 'blocks', blocks: currentSegment });
+  }
+
+  return { markdownParts, childEntries };
+}
+
+/**
+ * Convert markdownParts (from splitBlocksAtBoundaries) into a markdown string.
+ * Block segments are converted via notion-to-md; child links become relative paths.
+ */
+async function buildMarkdownFromParts(markdownParts, n2m, titleForErrors, stats, onError) {
+  let markdown = '';
+
+  for (const part of markdownParts) {
+    if (part.type === 'link') {
+      const relativePath = `./${part.name}/${part.name}.md`;
+      markdown += `- [${part.title}](${relativePath})\n`;
+    } else {
+      try {
+        const mdBlocks = await n2m.blocksToMarkdown(part.blocks);
+        const mdResult = n2m.toMarkdownString(mdBlocks);
+        const segment = mdResult.parent || '';
+        if (segment.trim()) {
+          markdown += segment;
+          if (!markdown.endsWith('\n\n')) {
+            markdown += '\n';
+          }
+        }
+      } catch (err) {
+        stats.errors.push({ title: titleForErrors, error: `Markdown conversion failed: ${err.message}` });
+        onError(`Conversion failed for segment in ${titleForErrors}: ${err.message}`);
+      }
+    }
+  }
+
+  return markdown;
+}
 
 /**
  * Download selected pages/databases to the local filesystem.
@@ -25,7 +99,7 @@ export async function downloadPages(selectedItems, savePath, notion, { onStatus,
   await ensureDir(savePath);
 
   const n2m = new NotionToMarkdown({
-    notionClient: notion.client,
+    notionClient: notion.throttledClient,
     config: {
       separateChildPage: true,
       parseChildPages: false,
@@ -83,7 +157,7 @@ async function downloadPage(pageId, name, parentDir, ctx, visited, depth) {
   // Fetch blocks ONCE through our throttled wrapper
   let blocks;
   try {
-    blocks = await notion.getBlockChildren(pageId);
+    blocks = await notion.getBlockChildrenDeep(pageId);
   } catch (err) {
     const mdPath = path.join(pageDir, `${name}.md`);
     await writeFile(mdPath, `# ${name}\n`, 'utf-8');
@@ -95,64 +169,8 @@ async function downloadPage(pageId, name, parentDir, ctx, visited, depth) {
 
   onStatus(`Converting: ${name} (${blocks.length} blocks)`);
 
-  // Split blocks into segments at child_page/child_database boundaries,
-  // convert each segment separately, and interleave child links to preserve order
-  const childNames = new Set();
-  const childEntries = [];
-  const markdownParts = [];
-  let currentSegment = [];
-
-  for (const block of blocks) {
-    if (block.type === 'child_page') {
-      // Flush current segment
-      if (currentSegment.length > 0) {
-        markdownParts.push({ type: 'blocks', blocks: currentSegment });
-        currentSegment = [];
-      }
-      const childTitle = block.child_page?.title || 'Untitled';
-      const childName = uniqueFilename(sanitizeFilename(childTitle), childNames);
-      childEntries.push({ block, title: childTitle, name: childName, type: 'page' });
-      markdownParts.push({ type: 'link', title: childTitle, name: childName, childType: 'page' });
-    } else if (block.type === 'child_database') {
-      if (currentSegment.length > 0) {
-        markdownParts.push({ type: 'blocks', blocks: currentSegment });
-        currentSegment = [];
-      }
-      const dbTitle = block.child_database?.title || 'Untitled Database';
-      const dbName = uniqueFilename(sanitizeFilename(dbTitle), childNames);
-      childEntries.push({ block, title: dbTitle, name: dbName, type: 'database' });
-      markdownParts.push({ type: 'link', title: dbTitle, name: dbName, childType: 'database' });
-    } else {
-      currentSegment.push(block);
-    }
-  }
-  if (currentSegment.length > 0) {
-    markdownParts.push({ type: 'blocks', blocks: currentSegment });
-  }
-
-  // Build markdown by converting each segment and inserting links inline
-  let markdown = `# ${name}\n\n`;
-
-  for (const part of markdownParts) {
-    if (part.type === 'link') {
-      const relativePath = `./${part.name}/${part.name}.md`;
-      markdown += `- [${part.title}](${relativePath})\n`;
-    } else {
-      try {
-        const mdBlocks = await n2m.blocksToMarkdown(part.blocks);
-        const mdResult = n2m.toMarkdownString(mdBlocks);
-        const segment = mdResult.parent || '';
-        if (segment.trim()) {
-          markdown += segment;
-          if (!markdown.endsWith('\n\n')) {
-            markdown += '\n';
-          }
-        }
-      } catch {
-        // Skip failed segments
-      }
-    }
-  }
+  const { markdownParts, childEntries } = splitBlocksAtBoundaries(blocks);
+  let markdown = `# ${name}\n\n` + await buildMarkdownFromParts(markdownParts, n2m, name, stats, onError);
 
   if (!markdown.trim()) {
     markdown = `# ${name}\n`;
@@ -190,6 +208,10 @@ async function downloadPage(pageId, name, parentDir, ctx, visited, depth) {
  */
 async function downloadDatabase(databaseId, name, parentDir, ctx, visited, depth) {
   if (visited.has(databaseId)) return;
+  if (depth > MAX_DEPTH) {
+    ctx.stats.errors.push({ title: name, error: `Skipped: exceeded max depth of ${MAX_DEPTH}` });
+    return;
+  }
   visited.add(databaseId);
 
   const { notion, n2m, stats, onStatus, onLog, onError } = ctx;
@@ -214,6 +236,11 @@ async function downloadDatabase(databaseId, name, parentDir, ctx, visited, depth
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
+
+    // Database rows ARE pages in Notion's model — track them for cycle detection
+    if (visited.has(row.id)) continue;
+    visited.add(row.id);
+
     const rowTitle = extractTitle(row);
     const rowName = uniqueFilename(sanitizeFilename(rowTitle), rowNames);
 
@@ -225,29 +252,18 @@ async function downloadDatabase(databaseId, name, parentDir, ctx, visited, depth
       const rowDir = path.join(dbDir, rowName);
       await ensureDir(rowDir);
 
-      // Fetch blocks through throttled wrapper, then convert
+      // Fetch blocks through throttled wrapper
       let blocks;
       try {
-        blocks = await notion.getBlockChildren(row.id);
-      } catch {
+        blocks = await notion.getBlockChildrenDeep(row.id);
+      } catch (err) {
         blocks = [];
+        stats.errors.push({ title: rowTitle, error: `Could not fetch blocks: ${err.message}` });
+        onError(`Could not fetch blocks for row: ${rowTitle} — ${err.message}`);
       }
 
-      let mdBlocks;
-      try {
-        mdBlocks = await n2m.blocksToMarkdown(blocks);
-      } catch {
-        mdBlocks = [];
-      }
-
-      let mdResult;
-      try {
-        mdResult = n2m.toMarkdownString(mdBlocks);
-      } catch {
-        mdResult = { parent: '' };
-      }
-
-      let markdown = mdResult.parent || '';
+      const { markdownParts, childEntries } = splitBlocksAtBoundaries(blocks);
+      const markdown = await buildMarkdownFromParts(markdownParts, n2m, rowTitle, stats, onError);
 
       let content = '';
       if (frontmatter) {
@@ -260,6 +276,20 @@ async function downloadDatabase(databaseId, name, parentDir, ctx, visited, depth
       const mdPath = path.join(rowDir, `${rowName}.md`);
       await writeFile(mdPath, content, 'utf-8');
       stats.totalPages++;
+
+      // Recurse into child pages and databases
+      for (const entry of childEntries) {
+        try {
+          if (entry.type === 'page') {
+            await downloadPage(entry.block.id, entry.name, rowDir, ctx, visited, depth + 1);
+          } else {
+            await downloadDatabase(entry.block.id, entry.name, rowDir, ctx, visited, depth + 1);
+          }
+        } catch (err) {
+          stats.errors.push({ title: entry.title, error: err.message });
+          onError(`Failed: ${entry.title} — ${err.message}`);
+        }
+      }
     } catch (err) {
       stats.errors.push({ title: rowTitle, error: err.message });
       onError(`Row failed: ${rowTitle} — ${err.message}`);
@@ -282,7 +312,6 @@ async function downloadDatabase(databaseId, name, parentDir, ctx, visited, depth
 async function processAssets(markdown, pageDir, stats, ctx) {
   const imageRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
   const assetsDir = path.join(pageDir, 'assets');
-  let assetsCreated = false;
   const usedAssetNames = new Set();
 
   const replacements = new Map();
@@ -301,34 +330,25 @@ async function processAssets(markdown, pageDir, stats, ctx) {
 
   if (downloads.length === 0) return markdown;
 
-  if (ctx) {
-    ctx.onStatus(`Downloading ${downloads.length} asset${downloads.length === 1 ? '' : 's'}...`);
-  }
+  ctx.onStatus(`Downloading ${downloads.length} asset${downloads.length === 1 ? '' : 's'}...`);
 
-  for (let i = 0; i < downloads.length; i++) {
-    const dl = downloads[i];
+  await ensureDir(assetsDir);
+
+  // Download assets with bounded concurrency (CDN, not Notion API — no rate limit)
+  let completed = 0;
+  await runWithConcurrency(downloads, ASSET_CONCURRENCY, async (dl) => {
     try {
-      if (!assetsCreated) {
-        await ensureDir(assetsDir);
-        assetsCreated = true;
-      }
-
-      if (ctx) {
-        ctx.onStatus(`Asset ${i + 1}/${downloads.length}: ${dl.filename}`);
-      }
-
       const assetPath = path.join(assetsDir, dl.filename);
       await downloadFile(dl.url, assetPath);
       stats.totalAssets++;
-
       replacements.set(dl.fullMatch, `![${dl.alt}](./assets/${dl.filename})`);
     } catch (err) {
-      if (ctx) {
-        ctx.onError(`Asset failed: ${dl.filename} — ${err.message}`);
-      }
-      // Leave original URL if download fails
+      ctx.onError(`Asset failed: ${dl.filename} — ${err.message}`);
+    } finally {
+      completed++;
+      ctx.onStatus(`Assets: ${completed}/${downloads.length}`);
     }
-  }
+  });
 
   if (replacements.size === 0) return markdown;
 
@@ -355,6 +375,23 @@ function isAllowedUrl(url) {
 }
 
 /**
+ * Run async tasks with bounded concurrency.
+ */
+async function runWithConcurrency(items, limit, fn) {
+  let index = 0;
+
+  async function worker() {
+    while (index < items.length) {
+      const item = items[index++];
+      await fn(item);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
+  await Promise.all(workers);
+}
+
+/**
  * Download a file from a URL to a local path with timeout.
  */
 async function downloadFile(url, destPath) {
@@ -364,8 +401,31 @@ async function downloadFile(url, destPath) {
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }
-  const buffer = Buffer.from(await response.arrayBuffer());
-  await writeFile(destPath, buffer);
+
+  // Early reject if Content-Length is known and too large
+  const contentLength = parseInt(response.headers.get('content-length'), 10);
+  if (contentLength > MAX_ASSET_SIZE) {
+    throw new Error(`File too large (${Math.round(contentLength / 1024 / 1024)}MB, limit ${MAX_ASSET_SIZE / 1024 / 1024}MB)`);
+  }
+
+  // Stream and count bytes to enforce limit even without Content-Length
+  const reader = response.body.getReader();
+  const chunks = [];
+  let totalBytes = 0;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    totalBytes += value.length;
+    if (totalBytes > MAX_ASSET_SIZE) {
+      reader.cancel();
+      throw new Error(`File too large (exceeded ${MAX_ASSET_SIZE / 1024 / 1024}MB during download)`);
+    }
+    chunks.push(value);
+  }
+
+  await writeFile(destPath, Buffer.concat(chunks));
 }
 
 /**

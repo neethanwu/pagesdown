@@ -135,7 +135,9 @@ async function main() {
 
     let topLevelItems;
     try {
-      topLevelItems = await notion.getTopLevelPages();
+      topLevelItems = await notion.getTopLevelPages({
+        onProgress: (count) => spin.message(`Scanning... (${count} items found)`),
+      });
     } catch (err) {
       spin.stop('Failed to fetch pages.');
       p.log.error(`Error: ${err.message}`);
@@ -184,7 +186,17 @@ async function main() {
     );
 
     if (!looksGood) {
-      p.log.info('Go to Notion and share more pages with your integration.');
+      p.note(
+        [
+          '  1. Open a page in Notion',
+          '  2. Click the ••• menu at the top right',
+          '  3. Select "Connections"',
+          '  4. Add your integration',
+          '',
+          'Sharing a parent page automatically shares all its children.',
+        ].join('\n'),
+        'How to share pages with your integration'
+      );
       exitIfCancelled(
         await p.confirm({ message: 'Done sharing? Press Enter to refresh.' })
       );

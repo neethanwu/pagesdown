@@ -26,7 +26,7 @@ export class NotionClient {
    * Auto-paginate any Notion list endpoint.
    * `fn` receives { start_cursor } and must return { results, has_more, next_cursor }.
    */
-  async paginate(fn) {
+  async paginate(fn, { onProgress } = {}) {
     const allResults = [];
     let cursor = undefined;
 
@@ -36,6 +36,7 @@ export class NotionClient {
       );
       allResults.push(...response.results);
       cursor = response.has_more ? response.next_cursor : undefined;
+      if (onProgress) onProgress(allResults.length);
     } while (cursor);
 
     return allResults;
@@ -55,18 +56,26 @@ export class NotionClient {
    * Get all top-level pages and databases shared with the integration.
    * Uses a single search call (halves API requests vs separate page/database queries).
    */
-  async getTopLevelPages() {
-    const allItems = await this.paginate((opts) =>
-      this.client.search({
-        page_size: 100,
-        ...opts,
-      })
+  async getTopLevelPages({ onProgress } = {}) {
+    const allItems = await this.paginate(
+      (opts) => this.client.search({ page_size: 100, ...opts }),
+      { onProgress }
     );
+
+    // Build a set of all item IDs so we can detect which items have
+    // their parent also in the set (i.e., they're not top-level).
+    const allIds = new Set(allItems.map((item) => item.id));
 
     const topLevel = [];
 
     for (const item of allItems) {
-      if (item.parent?.type !== 'workspace') continue;
+      // An item is "top-level" if its parent is the workspace, OR if its
+      // parent is not among the items shared with the integration (meaning
+      // it's the root of whatever subtree was shared).
+      const parentId = item.parent?.page_id || item.parent?.database_id;
+      const parentInResults = parentId && allIds.has(parentId);
+
+      if (item.parent?.type !== 'workspace' && parentInResults) continue;
 
       if (item.object === 'page') {
         topLevel.push({
@@ -97,6 +106,60 @@ export class NotionClient {
         ...opts,
       })
     );
+  }
+
+  /**
+   * Recursively fetch all block children through the throttled wrapper.
+   * Skips child_page/child_database (handled by our own recursion).
+   * This prevents notion-to-md from making unthrottled API calls.
+   */
+  async getBlockChildrenDeep(blockId, depth = 0) {
+    const blocks = await this.getBlockChildren(blockId);
+
+    if (depth >= 15) return blocks; // Safety valve for pathological nesting
+
+    for (const block of blocks) {
+      if (block.has_children && block.type !== 'child_page' && block.type !== 'child_database') {
+        block.children = await this.getBlockChildrenDeep(block.id, depth + 1);
+      }
+    }
+
+    return blocks;
+  }
+
+  /**
+   * Create a proxy around the raw Notion client that routes
+   * blocks.children.list through our throttle. This is passed to
+   * notion-to-md so its internal fetches respect rate limits.
+   */
+  get throttledClient() {
+    if (this._throttledClient) return this._throttledClient;
+
+    const self = this;
+    this._throttledClient = new Proxy(this.client, {
+      get(target, prop) {
+        if (prop === 'blocks') {
+          return new Proxy(target.blocks, {
+            get(blocksTarget, blocksProp) {
+              if (blocksProp === 'children') {
+                return new Proxy(blocksTarget.children, {
+                  get(childrenTarget, childrenProp) {
+                    if (childrenProp === 'list') {
+                      return (args) => self._throttledCall(() => childrenTarget.list(args));
+                    }
+                    return childrenTarget[childrenProp];
+                  },
+                });
+              }
+              return blocksTarget[blocksProp];
+            },
+          });
+        }
+        return target[prop];
+      },
+    });
+
+    return this._throttledClient;
   }
 
   /**
