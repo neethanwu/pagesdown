@@ -23,6 +23,10 @@
     "pagesdown",
     "ai-agents"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/neethanwu/ntn-download"
+  },
   "license": "MIT",
   "dependencies": {
     "@clack/prompts": "^1.1.0",
