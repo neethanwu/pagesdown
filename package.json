@@ -1,0 +1,30 @@
+{
+  "name": "notion-to-fs",
+  "version": "1.0.0",
+  "description": "Download your Notion content to local Markdown files. Beautiful CLI, clean output, ready for AI agents.",
+  "type": "module",
+  "bin": {
+    "notion-to-fs": "./bin/cli.js"
+  },
+  "files": [
+    "bin/",
+    "src/"
+  ],
+  "engines": {
+    "node": ">=20.12.0"
+  },
+  "keywords": [
+    "notion",
+    "markdown",
+    "export",
+    "cli",
+    "notion-to-markdown",
+    "notion-export"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@clack/prompts": "^1.1.0",
+    "@notionhq/client": "^2.2.15",
+    "notion-to-md": "^3.1.9"
+  }
+}
