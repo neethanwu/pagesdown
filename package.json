@@ -1,10 +1,10 @@
 {
-  "name": "ntn-download",
+  "name": "pagesdown",
   "version": "0.1.0",
   "description": "Download your Notion content to local Markdown files. Beautiful CLI, clean output, ready for AI agents.",
   "type": "module",
   "bin": {
-    "ntn-download": "bin/cli.js"
+    "pagesdown": "bin/cli.js"
   },
   "files": [
     "bin/",
@@ -20,7 +20,7 @@
     "cli",
     "notion-to-markdown",
     "notion-export",
-    "ntn-download",
+    "pagesdown",
     "ai-agents"
   ],
   "license": "MIT",
