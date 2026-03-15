@@ -157,13 +157,35 @@ async function downloadPage(pageId, name, parentDir, ctx, visited, depth) {
   // Fetch blocks ONCE through our throttled wrapper
   let blocks;
   try {
-    blocks = await notion.getBlockChildrenDeep(pageId);
+    const result = await notion.getBlockChildrenDeep(pageId);
+    blocks = result.blocks;
+    for (const w of result.warnings) {
+      stats.errors.push({ title: name, error: `Skipped block ${w.blockType}: ${w.error}` });
+      onError(`Partial fetch in ${name}: skipped ${w.blockType} block — ${w.error}`);
+    }
   } catch (err) {
-    const mdPath = path.join(pageDir, `${name}.md`);
-    await writeFile(mdPath, `# ${name}\n`, 'utf-8');
-    stats.totalPages++;
+    // Block fetch failed — usually because the page contains an inline
+    // database that isn't shared with the integration. Instead of writing
+    // a bare stub, retrieve whatever page metadata we can (properties/
+    // frontmatter) so the export is still useful.
     stats.errors.push({ title: name, error: `Could not fetch blocks: ${err.message}` });
     onError(`Could not fetch: ${name} — ${err.message}`);
+
+    let content = '';
+    try {
+      const page = await notion.getPage(pageId);
+      const frontmatter = buildFrontmatter(page.properties);
+      if (frontmatter) {
+        content += `---\n${frontmatter}---\n\n`;
+      }
+    } catch {
+      // Page metadata also inaccessible — continue with bare stub
+    }
+    content += `# ${name}\n`;
+
+    const mdPath = path.join(pageDir, `${name}.md`);
+    await writeFile(mdPath, content, 'utf-8');
+    stats.totalPages++;
     return;
   }
 
@@ -255,7 +277,12 @@ async function downloadDatabase(databaseId, name, parentDir, ctx, visited, depth
       // Fetch blocks through throttled wrapper
       let blocks;
       try {
-        blocks = await notion.getBlockChildrenDeep(row.id);
+        const result = await notion.getBlockChildrenDeep(row.id);
+        blocks = result.blocks;
+        for (const w of result.warnings) {
+          stats.errors.push({ title: rowTitle, error: `Skipped block ${w.blockType}: ${w.error}` });
+          onError(`Partial fetch in ${rowTitle}: skipped ${w.blockType} block — ${w.error}`);
+        }
       } catch (err) {
         blocks = [];
         stats.errors.push({ title: rowTitle, error: `Could not fetch blocks: ${err.message}` });

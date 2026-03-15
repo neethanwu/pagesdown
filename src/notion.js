@@ -15,7 +15,7 @@ export class NotionClient {
    * Uses a promise chain to ensure mutual exclusion (no concurrent requests).
    */
   _throttledCall(fn) {
-    this._queue = this._queue.then(async () => {
+    this._queue = this._queue.catch(() => {}).then(async () => {
       await new Promise((r) => setTimeout(r, this._minInterval));
       return fn();
     });
@@ -178,19 +178,28 @@ export class NotionClient {
    * Recursively fetch all block children through the throttled wrapper.
    * Skips child_page/child_database (handled by our own recursion).
    * This prevents notion-to-md from making unthrottled API calls.
+   *
+   * Returns { blocks, warnings } — warnings collects per-block fetch errors
+   * so the caller can report them without losing the rest of the page.
    */
-  async getBlockChildrenDeep(blockId, depth = 0) {
+  async getBlockChildrenDeep(blockId, depth = 0, warnings = []) {
     const blocks = await this.getBlockChildren(blockId);
 
-    if (depth >= 15) return blocks; // Safety valve for pathological nesting
+    if (depth >= 15) return { blocks, warnings }; // Safety valve for pathological nesting
 
     for (const block of blocks) {
       if (block.has_children && block.type !== 'child_page' && block.type !== 'child_database') {
-        block.children = await this.getBlockChildrenDeep(block.id, depth + 1);
+        try {
+          const result = await this.getBlockChildrenDeep(block.id, depth + 1, warnings);
+          block.children = result.blocks;
+        } catch (err) {
+          block.children = [];
+          warnings.push({ blockId: block.id, blockType: block.type, error: err.message });
+        }
       }
     }
 
-    return blocks;
+    return { blocks, warnings };
   }
 
   /**
