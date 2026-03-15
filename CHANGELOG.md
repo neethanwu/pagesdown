@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-03-15
+
+### Fixed
+
+- API throttle queue no longer breaks permanently after a single failed call — a failed parent-database lookup during discovery would poison the queue, causing all subsequent API calls (block fetching, database queries) to replay the same stale error
+- Recursive block fetching now catches errors per-block instead of failing the entire page — if one nested block is inaccessible, the rest of the page still exports
+- Pages that fail block fetching now export with property frontmatter instead of a bare title stub
+
 ## [0.1.2] - 2026-03-13
 
 ### Fixed
@@ -58,7 +66,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - ANSI Shadow ASCII art banner
 - MIT license
 
-[Unreleased]: https://github.com/neethanwu/pagesdown/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/neethanwu/pagesdown/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/neethanwu/pagesdown/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/neethanwu/pagesdown/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/neethanwu/pagesdown/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/neethanwu/pagesdown/releases/tag/v0.1.0
