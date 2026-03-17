@@ -56,30 +56,61 @@ function splitBlocksAtBoundaries(blocks) {
 }
 
 /**
- * Convert markdownParts (from splitBlocksAtBoundaries) into a markdown string.
- * Block segments are converted via notion-to-md; child links become relative paths.
+ * Check whether markdown content contains external image URLs.
  */
-async function buildMarkdownFromParts(markdownParts, n2m, titleForErrors, stats, onError) {
-  let markdown = '';
+function hasExternalImages(markdown) {
+  return /!\[[^\]]*\]\(https?:\/\/[^)]+\)/.test(markdown);
+}
+
+/**
+ * Convert block segments in markdownParts to markdown strings (one pass).
+ * Returns an array mirroring markdownParts where block entries have a `content`
+ * field with the converted markdown, and link entries are passed through as-is.
+ */
+async function convertBlockParts(markdownParts, n2m, titleForErrors, stats, onError) {
+  const converted = [];
 
   for (const part of markdownParts) {
     if (part.type === 'link') {
-      const relativePath = `./${part.name}/${part.name}.md`;
-      markdown += `- [${part.title}](${relativePath})\n`;
+      converted.push(part);
     } else {
       try {
         const mdBlocks = await n2m.blocksToMarkdown(part.blocks);
         const mdResult = n2m.toMarkdownString(mdBlocks);
-        const segment = mdResult.parent || '';
-        if (segment.trim()) {
-          markdown += segment;
-          if (!markdown.endsWith('\n\n')) {
-            markdown += '\n';
-          }
-        }
+        converted.push({ type: 'blocks', content: mdResult.parent || '' });
       } catch (err) {
         stats.errors.push({ title: titleForErrors, error: `Markdown conversion failed: ${err.message}` });
         onError(`Conversion failed for segment in ${titleForErrors}: ${err.message}`);
+        converted.push({ type: 'blocks', content: '' });
+      }
+    }
+  }
+
+  return converted;
+}
+
+/**
+ * Assemble pre-converted parts into a final markdown string.
+ * Uses childResults to determine link format: leaf children get flat links.
+ */
+function assembleMarkdown(convertedParts, childResults = new Map()) {
+  let markdown = '';
+
+  for (const part of convertedParts) {
+    if (part.type === 'link') {
+      const childInfo = childResults.get(part.name);
+      const isLeaf = childInfo ? childInfo.isLeaf : false;
+      const relativePath = isLeaf
+        ? `./${part.name}.md`
+        : `./${part.name}/${part.name}.md`;
+      markdown += `- [${part.title}](${relativePath})\n`;
+    } else {
+      const segment = part.content;
+      if (segment.trim()) {
+        markdown += segment;
+        if (!markdown.endsWith('\n\n')) {
+          markdown += '\n';
+        }
       }
     }
   }
@@ -122,7 +153,7 @@ export async function downloadPages(selectedItems, savePath, notion, { onStatus,
       if (item.type === 'database') {
         await downloadDatabase(item.id, safeName, savePath, ctx, visited, 0);
       } else {
-        await downloadPage(item.id, safeName, savePath, ctx, visited, 0);
+        await downloadPage(item.id, safeName, savePath, ctx, visited, 0, true);
       }
       onLog(`${prefix} Done: ${item.title} (${stats.totalPages} pages, ${stats.totalAssets} assets so far)`);
     } catch (err) {
@@ -140,21 +171,19 @@ export async function downloadPages(selectedItems, savePath, notion, { onStatus,
  *   1. Passes them to notion-to-md for markdown conversion (no extra API calls)
  *   2. Extracts child_page/child_database blocks for recursion
  */
-async function downloadPage(pageId, name, parentDir, ctx, visited, depth) {
-  if (visited.has(pageId)) return;
+async function downloadPage(pageId, name, parentDir, ctx, visited, depth, isTopLevel = false) {
+  if (visited.has(pageId)) return { isLeaf: true };
   if (depth > MAX_DEPTH) {
     ctx.stats.errors.push({ title: name, error: `Skipped: exceeded max depth of ${MAX_DEPTH}` });
-    return;
+    return { isLeaf: true };
   }
   visited.add(pageId);
 
   const { notion, n2m, stats, onStatus, onError } = ctx;
-  const pageDir = path.join(parentDir, name);
-  await ensureDir(pageDir);
 
   onStatus(`Fetching: ${name}`);
 
-  // Fetch blocks ONCE through our throttled wrapper
+  // Fetch blocks FIRST (before creating any directory)
   let blocks;
   try {
     const result = await notion.getBlockChildrenDeep(pageId);
@@ -164,12 +193,12 @@ async function downloadPage(pageId, name, parentDir, ctx, visited, depth) {
       onError(`Partial fetch in ${name}: skipped ${w.blockType} block — ${w.error}`);
     }
   } catch (err) {
-    // Block fetch failed — usually because the page contains an inline
-    // database that isn't shared with the integration. Instead of writing
-    // a bare stub, retrieve whatever page metadata we can (properties/
-    // frontmatter) so the export is still useful.
+    // Block fetch failed — conservatively use folder structure
     stats.errors.push({ title: name, error: `Could not fetch blocks: ${err.message}` });
     onError(`Could not fetch: ${name} — ${err.message}`);
+
+    const pageDir = path.join(parentDir, name);
+    await ensureDir(pageDir);
 
     let content = '';
     try {
@@ -186,25 +215,40 @@ async function downloadPage(pageId, name, parentDir, ctx, visited, depth) {
     const mdPath = path.join(pageDir, `${name}.md`);
     await writeFile(mdPath, content, 'utf-8');
     stats.totalPages++;
-    return;
+    return { isLeaf: false };
   }
 
   onStatus(`Converting: ${name} (${blocks.length} blocks)`);
 
   const { markdownParts, childEntries } = splitBlocksAtBoundaries(blocks);
-  let markdown = `# ${name}\n\n` + await buildMarkdownFromParts(markdownParts, n2m, name, stats, onError);
 
-  if (!markdown.trim()) {
-    markdown = `# ${name}\n`;
+  // Convert block segments once (avoids double conversion)
+  const convertedParts = await convertBlockParts(markdownParts, n2m, name, stats, onError);
+
+  // Check converted block content for images to determine leaf status
+  const blockContent = convertedParts
+    .filter((p) => p.type === 'blocks')
+    .map((p) => p.content)
+    .join('');
+  const hasImages = hasExternalImages(blockContent);
+
+  // A page is a leaf if it has no children and no images
+  // Top-level pages always keep their folder
+  const isLeaf = !isTopLevel && childEntries.length === 0 && !hasImages;
+
+  // Decide directory structure
+  let pageDir, mdPath;
+  if (isLeaf) {
+    mdPath = path.join(parentDir, `${name}.md`);
+    pageDir = parentDir;
+  } else {
+    pageDir = path.join(parentDir, name);
+    await ensureDir(pageDir);
+    mdPath = path.join(pageDir, `${name}.md`);
   }
 
-  markdown = await processAssets(markdown, pageDir, stats, ctx);
-
-  const mdPath = path.join(pageDir, `${name}.md`);
-  await writeFile(mdPath, markdown, 'utf-8');
-  stats.totalPages++;
-
-  // Now recurse into children
+  // Recurse into children BEFORE writing parent (to get leaf status for links)
+  const childResults = new Map();
   if (childEntries.length > 0) {
     const pageCount = childEntries.filter((e) => e.type === 'page').length;
     const dbCount = childEntries.filter((e) => e.type === 'database').length;
@@ -213,16 +257,35 @@ async function downloadPage(pageId, name, parentDir, ctx, visited, depth) {
 
   for (const entry of childEntries) {
     try {
+      let result;
       if (entry.type === 'page') {
-        await downloadPage(entry.block.id, entry.name, pageDir, ctx, visited, depth + 1);
+        result = await downloadPage(entry.block.id, entry.name, pageDir, ctx, visited, depth + 1);
       } else {
-        await downloadDatabase(entry.block.id, entry.name, pageDir, ctx, visited, depth + 1);
+        result = await downloadDatabase(entry.block.id, entry.name, pageDir, ctx, visited, depth + 1);
       }
+      childResults.set(entry.name, result || { isLeaf: false });
     } catch (err) {
       stats.errors.push({ title: entry.title, error: err.message });
       onError(`Failed: ${entry.title} — ${err.message}`);
+      childResults.set(entry.name, { isLeaf: false });
     }
   }
+
+  // Assemble final markdown with correct links based on child leaf status
+  let markdown = `# ${name}\n\n` + assembleMarkdown(convertedParts, childResults);
+
+  if (!markdown.trim()) {
+    markdown = `# ${name}\n`;
+  }
+
+  if (!isLeaf) {
+    markdown = await processAssets(markdown, pageDir, stats, ctx);
+  }
+
+  await writeFile(mdPath, markdown, 'utf-8');
+  stats.totalPages++;
+
+  return { isLeaf };
 }
 
 /**
@@ -255,6 +318,7 @@ async function downloadDatabase(databaseId, name, parentDir, ctx, visited, depth
 
   const rowNames = new Set();
   const rowLinks = [];
+  const rowLeafStatus = new Map();
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
@@ -271,8 +335,6 @@ async function downloadDatabase(databaseId, name, parentDir, ctx, visited, depth
 
     try {
       const frontmatter = buildFrontmatter(row.properties);
-      const rowDir = path.join(dbDir, rowName);
-      await ensureDir(rowDir);
 
       // Fetch blocks through throttled wrapper
       let blocks;
@@ -290,7 +352,45 @@ async function downloadDatabase(databaseId, name, parentDir, ctx, visited, depth
       }
 
       const { markdownParts, childEntries } = splitBlocksAtBoundaries(blocks);
-      const markdown = await buildMarkdownFromParts(markdownParts, n2m, rowTitle, stats, onError);
+
+      // Convert block segments once
+      const convertedParts = await convertBlockParts(markdownParts, n2m, rowTitle, stats, onError);
+      const blockContent = convertedParts
+        .filter((p) => p.type === 'blocks')
+        .map((p) => p.content)
+        .join('');
+      const hasImages = hasExternalImages(blockContent);
+      const rowIsLeaf = childEntries.length === 0 && !hasImages;
+      rowLeafStatus.set(rowName, rowIsLeaf);
+
+      // Recurse into children BEFORE writing row (to get leaf status for links)
+      let rowDir;
+      if (rowIsLeaf) {
+        rowDir = dbDir;
+      } else {
+        rowDir = path.join(dbDir, rowName);
+        await ensureDir(rowDir);
+      }
+
+      const childResults = new Map();
+      for (const entry of childEntries) {
+        try {
+          let result;
+          if (entry.type === 'page') {
+            result = await downloadPage(entry.block.id, entry.name, rowDir, ctx, visited, depth + 1);
+          } else {
+            result = await downloadDatabase(entry.block.id, entry.name, rowDir, ctx, visited, depth + 1);
+          }
+          childResults.set(entry.name, result || { isLeaf: false });
+        } catch (err) {
+          stats.errors.push({ title: entry.title, error: err.message });
+          onError(`Failed: ${entry.title} — ${err.message}`);
+          childResults.set(entry.name, { isLeaf: false });
+        }
+      }
+
+      // Assemble final markdown with correct links
+      const markdown = assembleMarkdown(convertedParts, childResults);
 
       let content = '';
       if (frontmatter) {
@@ -298,38 +398,34 @@ async function downloadDatabase(databaseId, name, parentDir, ctx, visited, depth
       }
       content += `# ${rowName}\n\n${markdown}`;
 
-      content = await processAssets(content, rowDir, stats, ctx);
+      if (!rowIsLeaf) {
+        content = await processAssets(content, rowDir, stats, ctx);
+      }
 
-      const mdPath = path.join(rowDir, `${rowName}.md`);
+      const mdPath = rowIsLeaf
+        ? path.join(dbDir, `${rowName}.md`)
+        : path.join(rowDir, `${rowName}.md`);
       await writeFile(mdPath, content, 'utf-8');
       stats.totalPages++;
-
-      // Recurse into child pages and databases
-      for (const entry of childEntries) {
-        try {
-          if (entry.type === 'page') {
-            await downloadPage(entry.block.id, entry.name, rowDir, ctx, visited, depth + 1);
-          } else {
-            await downloadDatabase(entry.block.id, entry.name, rowDir, ctx, visited, depth + 1);
-          }
-        } catch (err) {
-          stats.errors.push({ title: entry.title, error: err.message });
-          onError(`Failed: ${entry.title} — ${err.message}`);
-        }
-      }
     } catch (err) {
       stats.errors.push({ title: rowTitle, error: err.message });
       onError(`Row failed: ${rowTitle} — ${err.message}`);
     }
   }
 
-  // Create database index file listing all rows
+  // Create database index file listing all rows (with leaf-aware links)
   const indexLines = [`# ${name}\n`];
   for (const row of rowLinks) {
-    indexLines.push(`- [${row.title}](./${row.name}/${row.name}.md)`);
+    const isLeaf = rowLeafStatus.get(row.name) || false;
+    const linkPath = isLeaf
+      ? `./${row.name}.md`
+      : `./${row.name}/${row.name}.md`;
+    indexLines.push(`- [${row.title}](${linkPath})`);
   }
   const indexPath = path.join(dbDir, `${name}.md`);
   await writeFile(indexPath, indexLines.join('\n') + '\n', 'utf-8');
+
+  return { isLeaf: false };
 }
 
 /**
