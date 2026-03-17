@@ -4,7 +4,21 @@ Download your Notion content to local Markdown files. Beautiful guided CLI, clea
 
 ## Why?
 
-Notion's MCP server and API are token-expensive. If you use AI coding agents like Claude Code, Codex, or OpenClaw, having your Notion content as local Markdown files is dramatically cheaper and faster.
+I got sick of Notion's MCP server burning through tokens on every read, querying back and forth for what should be a simple task. The search tool can't even list database pages without a query. Connection drops kill your flow mid-task.
+
+I'm local-first on almost everything now — the cloud just happens after my work, for syncing results. So I decided to pull my thousands of Notion pages down to local Markdown and enjoy my sweet time with my agents. Zero MCP overhead, zero token waste, works offline.
+
+**Works with** Claude Code, Codex, and any agent that reads your local filesystem.
+
+## How It Works
+
+```
+npx pagesdown → select pages → local markdown → point your agent at it
+```
+
+**Before (MCP):** Agent → Notion API call → wait → parse response → tokens burned on every read
+
+**After (pagesdown):** Agent → reads local `.md` file → done
 
 ## Prerequisites
 
