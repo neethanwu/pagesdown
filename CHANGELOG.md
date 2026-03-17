@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-03-16
+
+### Changed
+
+- Leaf subpages (no children, no images) are now saved as flat files alongside their parent instead of inside a wrapper subdirectory
+- Database rows without children or images are similarly flattened
+- Parent markdown links adapt automatically (`./Child.md` for leaf, `./Child/Child.md` for non-leaf)
+
 ## [0.1.3] - 2026-03-15
 
 ### Fixed
@@ -66,7 +74,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - ANSI Shadow ASCII art banner
 - MIT license
 
-[Unreleased]: https://github.com/neethanwu/pagesdown/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/neethanwu/pagesdown/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/neethanwu/pagesdown/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/neethanwu/pagesdown/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/neethanwu/pagesdown/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/neethanwu/pagesdown/compare/v0.1.0...v0.1.1
